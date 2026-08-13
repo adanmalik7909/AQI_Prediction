@@ -1,0 +1,12 @@
+# requirements-feature.txt
+# Lightweight dependencies for the FEATURE PIPELINE ONLY.
+# Used by the hourly GitHub Actions workflow to keep runs fast.
+# (No ML libraries needed — just data collection + push to Hopsworks)
+#
+# The TRAINING pipeline uses the full requirements-pipeline.txt instead.
+
+requests
+pandas
+numpy
+python-dotenv
+hopsworks

@@ -1,0 +1,37 @@
+# requirements-pipeline.txt
+# For: feature_pipeline/ and training_pipeline/ (NOT the web app - see requirements-webapp.txt)
+#
+# All versions below were chosen so they can install TOGETHER without conflict:
+#   - hopsworks needs protobuf >=4.25.4, <5.0.0
+#   - tensorflow >=2.15,<2.19 is the last range that's happy with protobuf <5.0.0
+#     (tensorflow 2.19+ requires much newer protobuf, which conflicts with hopsworks)
+#   - xgboost <3.0.0 avoids a known bug where SHAP's TreeExplainer cannot read
+#     XGBoost 3.x's newer base_score serialization format
+#
+# *** WINDOWS PREREQUISITE - DO THIS FIRST, BEFORE pip install *** :
+#   hopsworks depends on pyjks -> twofish, which has no Windows pip wheel and
+#   needs a C++ compiler to build from source. Install it via conda first:
+#     conda install -c conda-forge twofish
+#     setx CONDA_DLL_SEARCH_MODIFICATION_ENABLE 1
+#   Then OPEN A NEW TERMINAL (setx only applies to new sessions) before
+#   continuing with the pip install below.
+#
+# Install with a SINGLE command (don't install one-by-one / don't --force-reinstall
+# individual packages later) so pip's resolver considers everything at once:
+#   pip install -r requirements-pipeline.txt
+
+requests
+pandas
+numpy
+scipy
+scikit-learn
+tensorflow>=2.15,<2.19
+xgboost>=2.0,<3.0
+protobuf>=4.25.4,<5.0.0
+joblib
+hopsworks
+shap
+matplotlib
+seaborn
+python-dotenv
+jupyter

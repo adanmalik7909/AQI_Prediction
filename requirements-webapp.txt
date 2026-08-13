@@ -1,0 +1,21 @@
+# requirements-webapp.txt
+# For: webapp/ (Phase 10 - Streamlit dashboard)
+#
+# Deliberately kept in a SEPARATE environment from requirements-pipeline.txt.
+# streamlit needs protobuf >=5.26.1, which directly conflicts with hopsworks'
+# protobuf <5.0.0 requirement - there is no single protobuf version that
+# satisfies both at once.
+#
+# SOLUTION: the web app does NOT install the full `hopsworks` SDK at all.
+# Instead, it talks to Hopsworks over its plain REST API (via `requests`),
+# which has no protobuf dependency - so this environment is free to use
+# whatever protobuf version streamlit needs.
+#
+# This file will be filled in properly when we reach Phase 10.
+
+streamlit
+flask
+requests
+pandas
+joblib
+python-dotenv
