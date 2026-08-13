@@ -9,4 +9,4 @@ requests
 pandas
 numpy
 python-dotenv
-hopsworks
+hopsworks[python]
