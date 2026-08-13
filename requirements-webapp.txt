@@ -1,21 +1,16 @@
 # requirements-webapp.txt
 # For: webapp/ (Phase 10 - Streamlit dashboard)
 #
-# Deliberately kept in a SEPARATE environment from requirements-pipeline.txt.
-# streamlit needs protobuf >=5.26.1, which directly conflicts with hopsworks'
-# protobuf <5.0.0 requirement - there is no single protobuf version that
-# satisfies both at once.
+# GOOD NEWS: streamlit < 1.35 requires protobuf <5,>=3.20, which OVERLAPS
+# with hopsworks' requirement of protobuf <5.0,>=4.25.4 (both are happy
+# with anything in the 4.25.4-5.0 range). This means the web app can be
+# installed into the SAME aqi_env as the rest of the pipeline - no need
+# for a separate environment, and the web app can use the real Hopsworks
+# SDK (genuine Feature Store + Model Registry access, as the project
+# requires) instead of hand-rolling REST calls.
 #
-# SOLUTION: the web app does NOT install the full `hopsworks` SDK at all.
-# Instead, it talks to Hopsworks over its plain REST API (via `requests`),
-# which has no protobuf dependency - so this environment is free to use
-# whatever protobuf version streamlit needs.
-#
-# This file will be filled in properly when we reach Phase 10.
+# Install directly into aqi_env:
+#   pip install -r requirements-webapp.txt
 
-streamlit
+streamlit<1.35
 flask
-requests
-pandas
-joblib
-python-dotenv

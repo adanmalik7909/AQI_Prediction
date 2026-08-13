@@ -31,7 +31,14 @@ from hopsworks_client import get_feature_store
 from config import HOPSWORKS_PROJECT_NAME, FEATURE_GROUP_NAME, FEATURE_GROUP_VERSION
 
 
-def fetch_and_prepare_training_data():
+def fetch_engineered_data():
+    """
+    Reads from the Feature Store and adds lag/rolling engineered features.
+    Does NOT build forecast targets or drop any rows - shared by:
+      - fetch_and_prepare_training_data() below (adds targets afterwards)
+      - webapp/app.py (just needs the most recent row's engineered
+        features to make a live prediction - it has no "future" targets)
+    """
     fs = get_feature_store(HOPSWORKS_PROJECT_NAME)
     fg = fs.get_feature_group(name=FEATURE_GROUP_NAME, version=FEATURE_GROUP_VERSION)
 
@@ -54,6 +61,12 @@ def fetch_and_prepare_training_data():
     df["aqi_change_rate"] = df["aqi"] - df["aqi_lag_1"]           # how fast AQI is moving
     df["aqi_rolling_mean_24h"] = df["aqi"].shift(1).rolling(window=24).mean()
     df["pm2_5_rolling_mean_24h"] = df["pm2_5"].shift(1).rolling(window=24).mean()
+
+    return df
+
+
+def fetch_and_prepare_training_data():
+    df = fetch_engineered_data()
 
     # --- Forecasting targets: AQI N hours in the FUTURE ---
     df["target_24h"] = df["aqi"].shift(-24)
