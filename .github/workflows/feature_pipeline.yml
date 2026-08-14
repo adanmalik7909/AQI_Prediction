@@ -12,8 +12,8 @@
 name: Feature Pipeline
 
 on:
-  schedule:
-    - cron: '0 * * * *'     # Every hour at :00
+  # schedule:
+  #   - cron: '0 * * * *'   # Every hour at :00  [PAUSED - re-enable before Sept 1 submission]
   workflow_dispatch:          # Manual "Run workflow" button in Actions tab
 
 # If a run is already in progress, don't start another one

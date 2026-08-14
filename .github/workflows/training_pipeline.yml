@@ -13,8 +13,8 @@
 name: Training Pipeline
 
 on:
-  schedule:
-    - cron: '0 2 * * *'      # Daily at 2:00 AM UTC = 7:00 AM PKT
+  # schedule:
+  #   - cron: '0 2 * * *'    # Daily at 2:00 AM UTC = 7:00 AM PKT  [PAUSED - re-enable before Sept 1 submission]
   workflow_dispatch:           # Manual "Run workflow" button in Actions tab
 
 # If a run is already in progress, don't start another one
