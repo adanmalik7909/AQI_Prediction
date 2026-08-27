@@ -1,0 +1,17 @@
+# webapp/requirements.txt
+# Streamlit Community Cloud automatically installs from a requirements.txt
+# file located next to the app's entry point (this file). This combines
+# everything webapp/app.py needs in one place for deployment.
+
+streamlit<1.35
+plotly
+pandas
+numpy
+scikit-learn
+xgboost>=2.0,<3.0
+tensorflow>=2.15,<2.19
+protobuf>=4.25.4,<5.0.0
+joblib
+hopsworks[python]
+shap
+python-dotenv

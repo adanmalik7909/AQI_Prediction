@@ -57,11 +57,20 @@ def chronological_split(df, test_fraction):
 def build_neural_network(input_dim):
     model = keras.Sequential([
         keras.layers.Input(shape=(input_dim,)),
+        keras.layers.Dense(128, activation="relu"),
+        keras.layers.BatchNormalization(),
+        keras.layers.Dropout(0.3),
         keras.layers.Dense(64, activation="relu"),
+        keras.layers.BatchNormalization(),
+        keras.layers.Dropout(0.2),
         keras.layers.Dense(32, activation="relu"),
         keras.layers.Dense(1),
     ])
-    model.compile(optimizer="adam", loss="mse", metrics=["mae"])
+    model.compile(
+        optimizer=keras.optimizers.Adam(learning_rate=0.001),
+        loss="huber",       # more robust to outliers than MSE
+        metrics=["mae"],
+    )
     return model
 
 
@@ -106,7 +115,11 @@ def train_and_evaluate_horizon(df, feature_cols, target_col):
     trained_models["ridge"] = ridge
 
     # --- 2. Random Forest (no early stopping needed -> use full train set) ---
-    rf = RandomForestRegressor(n_estimators=200, max_depth=15, random_state=42, n_jobs=-1)
+    rf = RandomForestRegressor(
+        n_estimators=500, max_depth=20,
+        min_samples_leaf=5, min_samples_split=10,
+        max_features="sqrt", random_state=42, n_jobs=-1,
+    )
     rf.fit(X_train_full, y_train_full)
     preds = rf.predict(X_test)
     results.append(evaluate_predictions(y_test, preds, "Random Forest"))
@@ -119,33 +132,39 @@ def train_and_evaluate_horizon(df, feature_cols, target_col):
     # validation performance stops improving instead of training the full
     # n_estimators regardless.
     xgb = XGBRegressor(
-        n_estimators=1000,
-        max_depth=4,
-        learning_rate=0.03,
+        n_estimators=2000,
+        max_depth=5,
+        learning_rate=0.02,
         subsample=0.8,
-        colsample_bytree=0.8,
-        reg_alpha=1.0,
-        reg_lambda=2.0,
+        colsample_bytree=0.7,
+        colsample_bylevel=0.7,
+        reg_alpha=0.5,
+        reg_lambda=3.0,
+        min_child_weight=5,
+        gamma=0.1,
         base_score=float(y_train.mean()),  # explicit float - avoids a known XGBoost 3.x / SHAP bug
         random_state=42,
         eval_metric="rmse",
-        early_stopping_rounds=30,
+        early_stopping_rounds=50,
     )
     xgb.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
     preds = xgb.predict(X_test)
     results.append(evaluate_predictions(y_test, preds, "XGBoost (tuned)"))
     trained_models["xgboost"] = xgb
-    print(f"  (XGBoost stopped at {xgb.best_iteration} trees, out of 1000 max)")
+    print(f"  (XGBoost stopped at {xgb.best_iteration} trees, out of 2000 max)")
 
-    # --- 4. Neural Network (TensorFlow) - now uses a proper held-out validation set ---
+    # --- 4. Neural Network (TensorFlow) - BatchNorm + Dropout + Huber + LR schedule ---
     nn = build_neural_network(X_train_scaled.shape[1])
     nn.fit(
         X_train_scaled, y_train,
         validation_data=(X_val_scaled, y_val),
-        epochs=100,
-        batch_size=64,
+        epochs=200,
+        batch_size=32,
         verbose=0,
-        callbacks=[keras.callbacks.EarlyStopping(patience=8, restore_best_weights=True)],
+        callbacks=[
+            keras.callbacks.EarlyStopping(patience=15, restore_best_weights=True),
+            keras.callbacks.ReduceLROnPlateau(patience=5, factor=0.5, min_lr=1e-5),
+        ],
     )
     preds = nn.predict(X_test_scaled, verbose=0).flatten()
     results.append(evaluate_predictions(y_test, preds, "Neural Network (TF)"))

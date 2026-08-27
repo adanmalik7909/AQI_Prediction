@@ -10,6 +10,7 @@ aqi_env/
 
 # Trained models (stored in Hopsworks Model Registry, not in git)
 trained_models/
+webapp/model_cache/
 
 # OS
 .DS_Store
