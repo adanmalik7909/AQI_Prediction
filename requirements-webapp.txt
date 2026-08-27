@@ -13,4 +13,5 @@
 #   pip install -r requirements-webapp.txt
 
 streamlit<1.35
+plotly>=5.18
 flask
