@@ -400,7 +400,20 @@ def _load_models():
             m = joblib.load(os.path.join(d, md["model_file"]))
         else:
             from tensorflow import keras
-            m = keras.models.load_model(os.path.join(d, md["model_file"]))
+            try:
+                m = keras.models.load_model(os.path.join(d, md["model_file"]), compile=False)
+            except Exception:
+                class SafeDense(keras.layers.Dense):
+                    @classmethod
+                    def from_config(cls, config):
+                        config.pop("quantization_config", None)
+                        return super().from_config(config)
+
+                m = keras.models.load_model(
+                    os.path.join(d, md["model_file"]),
+                    custom_objects={"Dense": SafeDense},
+                    compile=False,
+                )
         models[h] = {"model": m, "scaler": sc, "meta": md, "ver": meta.version}
     return models
 
