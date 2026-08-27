@@ -374,6 +374,25 @@ def _load_data():
 def _load_models():
     _, mr = _connect()
     models = {}
+
+    # Patch Keras layer initialization globally to safely handle version differences
+    # (e.g. quantization_config added in newer Keras serialization)
+    try:
+        from tensorflow import keras
+        _orig_layer_init = keras.layers.Layer.__init__
+        def _patched_layer_init(self, *args, **kwargs):
+            kwargs.pop("quantization_config", None)
+            return _orig_layer_init(self, *args, **kwargs)
+        keras.layers.Layer.__init__ = _patched_layer_init
+
+        _orig_dense_init = keras.layers.Dense.__init__
+        def _patched_dense_init(self, *args, **kwargs):
+            kwargs.pop("quantization_config", None)
+            return _orig_dense_init(self, *args, **kwargs)
+        keras.layers.Dense.__init__ = _patched_dense_init
+    except Exception:
+        pass
+
     for h in TARGET_HORIZONS:
         name = f"aqi_model_{h}"
         meta = max(mr.get_models(name), key=lambda m: m.version)
@@ -400,20 +419,7 @@ def _load_models():
             m = joblib.load(os.path.join(d, md["model_file"]))
         else:
             from tensorflow import keras
-            try:
-                m = keras.models.load_model(os.path.join(d, md["model_file"]), compile=False)
-            except Exception:
-                class SafeDense(keras.layers.Dense):
-                    @classmethod
-                    def from_config(cls, config):
-                        config.pop("quantization_config", None)
-                        return super().from_config(config)
-
-                m = keras.models.load_model(
-                    os.path.join(d, md["model_file"]),
-                    custom_objects={"Dense": SafeDense},
-                    compile=False,
-                )
+            m = keras.models.load_model(os.path.join(d, md["model_file"]), compile=False)
         models[h] = {"model": m, "scaler": sc, "meta": md, "ver": meta.version}
     return models
 
