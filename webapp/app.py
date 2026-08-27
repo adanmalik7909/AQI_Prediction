@@ -318,8 +318,11 @@ def _load_data():
     try:
         query = fg.filter(fg["unix_time"] > cutoff_time)
         df = query.read()
+        if len(df) == 0:
+            raise ValueError("No rows found in recent window - pipeline may be paused")
     except Exception:
-        # Fallback: if filter fails, read all and slice (slower but safe)
+        # Fallback: if filter fails OR the recent window is empty
+        # (e.g. the hourly pipeline was paused), read all history instead.
         try:
             df = fg.read()
         except Exception:
