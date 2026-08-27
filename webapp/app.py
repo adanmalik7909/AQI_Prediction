@@ -46,33 +46,55 @@ from train_models import get_feature_columns, TARGET_HORIZONS
 MODEL_CACHE_DIR = os.path.join(os.path.dirname(__file__), "model_cache")
 
 # =====================================================================
-#  KERAS COMPATIBILITY PATCHES (run once at import time)
+#  KERAS SAFE LOADER  (handles version-mismatch serialization keys)
 # =====================================================================
-# Models saved with Keras 3.12+ serialize config keys (quantization_config,
-# input_axes, output_axes) that some builds of the SAME Keras version
-# reject during deserialization. We monkey-patch at module level so it
-# runs exactly once and cannot cause infinite recursion.
-try:
-    from tensorflow import keras as _keras
+# Models saved with Keras 3.12+ serialize config keys that the SAME or
+# older Keras version rejects during deserialization (quantization_config,
+# input_axes, output_axes, renorm*, etc.). Instead of monkey-patching
+# individual classes (which leads to whack-a-mole), we clean the config
+# inside the .keras ZIP BEFORE loading.  This is surgical and universal.
 
-    # Patch 1: Layer.__init__ — strip quantization_config
-    _orig_layer_init = _keras.layers.Layer.__init__
-    def _compat_layer_init(self, *args, **kwargs):
-        kwargs.pop("quantization_config", None)
-        return _orig_layer_init(self, *args, **kwargs)
-    _keras.layers.Layer.__init__ = _compat_layer_init
+_STRIP_KEYS = {
+    "quantization_config",   # Dense — newer Keras
+    "input_axes",            # Initializers — newer Keras
+    "output_axes",           # Initializers — newer Keras
+    "renorm",                # BatchNormalization — deprecated param
+    "renorm_clipping",       # BatchNormalization — deprecated param
+    "renorm_momentum",       # BatchNormalization — deprecated param
+}
 
-    # Patch 2: Initializer.from_config — strip input_axes / output_axes
-    _orig_init_from_config = _keras.initializers.Initializer.from_config.__func__
-    @classmethod
-    def _compat_init_from_config(cls, config):
-        config = dict(config)  # avoid mutating the original
-        config.pop("input_axes", None)
-        config.pop("output_axes", None)
-        return cls(**config)
-    _keras.initializers.Initializer.from_config = _compat_init_from_config
-except Exception:
-    pass  # TensorFlow not installed or patch not needed
+def _clean_config(obj):
+    """Recursively strip problematic keys from a Keras config dict/list."""
+    if isinstance(obj, dict):
+        return {k: _clean_config(v) for k, v in obj.items()
+                if k not in _STRIP_KEYS}
+    if isinstance(obj, list):
+        return [_clean_config(item) for item in obj]
+    return obj
+
+def _load_keras_model_safe(path):
+    """Load a .keras model with config cleaning for version compat."""
+    import zipfile, tempfile
+    from tensorflow import keras
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".keras", delete=False)
+    tmp_path = tmp.name
+    tmp.close()
+
+    try:
+        with zipfile.ZipFile(path, "r") as zin, \
+             zipfile.ZipFile(tmp_path, "w") as zout:
+            for item in zin.infolist():
+                data = zin.read(item.filename)
+                if item.filename == "config.json":
+                    cfg = json.loads(data)
+                    cfg = _clean_config(cfg)
+                    data = json.dumps(cfg).encode("utf-8")
+                zout.writestr(item, data)
+        return keras.models.load_model(tmp_path, compile=False)
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
 # =====================================================================
 #  CONSTANTS
@@ -428,8 +450,7 @@ def _load_models():
         if md["flavor"] == "sklearn":
             m = joblib.load(os.path.join(d, md["model_file"]))
         else:
-            from tensorflow import keras
-            m = keras.models.load_model(os.path.join(d, md["model_file"]), compile=False)
+            m = _load_keras_model_safe(os.path.join(d, md["model_file"]))
         models[h] = {"model": m, "scaler": sc, "meta": md, "ver": meta.version}
     return models
 
