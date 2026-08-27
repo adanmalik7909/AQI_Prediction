@@ -46,6 +46,35 @@ from train_models import get_feature_columns, TARGET_HORIZONS
 MODEL_CACHE_DIR = os.path.join(os.path.dirname(__file__), "model_cache")
 
 # =====================================================================
+#  KERAS COMPATIBILITY PATCHES (run once at import time)
+# =====================================================================
+# Models saved with Keras 3.12+ serialize config keys (quantization_config,
+# input_axes, output_axes) that some builds of the SAME Keras version
+# reject during deserialization. We monkey-patch at module level so it
+# runs exactly once and cannot cause infinite recursion.
+try:
+    from tensorflow import keras as _keras
+
+    # Patch 1: Layer.__init__ — strip quantization_config
+    _orig_layer_init = _keras.layers.Layer.__init__
+    def _compat_layer_init(self, *args, **kwargs):
+        kwargs.pop("quantization_config", None)
+        return _orig_layer_init(self, *args, **kwargs)
+    _keras.layers.Layer.__init__ = _compat_layer_init
+
+    # Patch 2: Initializer.from_config — strip input_axes / output_axes
+    _orig_init_from_config = _keras.initializers.Initializer.from_config.__func__
+    @classmethod
+    def _compat_init_from_config(cls, config):
+        config = dict(config)  # avoid mutating the original
+        config.pop("input_axes", None)
+        config.pop("output_axes", None)
+        return cls(**config)
+    _keras.initializers.Initializer.from_config = _compat_init_from_config
+except Exception:
+    pass  # TensorFlow not installed or patch not needed
+
+# =====================================================================
 #  CONSTANTS
 # =====================================================================
 
@@ -374,25 +403,6 @@ def _load_data():
 def _load_models():
     _, mr = _connect()
     models = {}
-
-    # Patch Keras layer initialization globally to safely handle version differences
-    # (e.g. quantization_config added in newer Keras serialization)
-    try:
-        from tensorflow import keras
-        _orig_layer_init = keras.layers.Layer.__init__
-        def _patched_layer_init(self, *args, **kwargs):
-            kwargs.pop("quantization_config", None)
-            return _orig_layer_init(self, *args, **kwargs)
-        keras.layers.Layer.__init__ = _patched_layer_init
-
-        _orig_dense_init = keras.layers.Dense.__init__
-        def _patched_dense_init(self, *args, **kwargs):
-            kwargs.pop("quantization_config", None)
-            return _orig_dense_init(self, *args, **kwargs)
-        keras.layers.Dense.__init__ = _patched_dense_init
-    except Exception:
-        pass
-
     for h in TARGET_HORIZONS:
         name = f"aqi_model_{h}"
         meta = max(mr.get_models(name), key=lambda m: m.version)
