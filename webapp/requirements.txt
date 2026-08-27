@@ -3,7 +3,7 @@
 # file located next to the app's entry point (this file). This combines
 # everything webapp/app.py needs in one place for deployment.
 
-streamlit<1.35
+streamlit>=1.28,<1.35
 plotly
 pandas
 numpy
