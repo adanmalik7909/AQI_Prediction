@@ -119,7 +119,65 @@ STORE_COLUMNS = [
 
 
 
+# The dtype each stored column must have, pinned to what the feature group is
+# actually registered with (verified against fg.features).
+#
+# WHY THIS EXISTS - a real failure, not defensiveness
+# `is_weekend` was built with `.astype(int)`. Python's bare `int` is int32 on
+# Windows and int64 on Linux, which Hopsworks maps to 'int' and 'bigint'
+# respectively. The feature group was registered from a Windows machine, so
+# every GitHub Actions run (Linux) was rejected:
+#
+#   FeatureStoreException: is_weekend (expected type: 'int', derived from
+#   input: 'bigint') has the wrong type
+#
+# Pinning the widths makes the insert schema identical everywhere. Any int-like
+# column is also a hazard in the other direction: Open-Meteo occasionally
+# returns a whole number where it usually sends a decimal (or vice versa), which
+# would flip float64 <-> int64 and fail the same way.
+STORE_DTYPES = {
+    "city": "object", "timestamp": "object", "unix_time": "int64",
+    "hour": "int32", "day": "int32", "month": "int32",
+    "day_of_week": "int32", "is_weekend": "int32",
+    "temperature": "float64", "humidity": "int64", "pressure": "float64",
+    "wind_speed": "float64", "cloud_cover": "int64",
+    "blh": "float64", "precipitation": "float64", "dew_point": "float64",
+    "wind_dir": "int64", "radiation": "float64", "wind_speed_100m": "float64",
+    "pm2_5": "float64", "pm10": "float64", "o3": "float64", "co": "float64",
+    "so2": "float64", "no2": "float64", "dust": "float64", "aod": "float64",
+    "aqi": "float64", "dominant_pollutant": "object",
+}
+
+
+def coerce_store_dtypes(df):
+    """Force every column to its registered width. Applied at the insert itself,
+    so it holds for the hourly pipeline and the historical backfill alike.
+
+    Integer columns are rounded before casting: a NaN cannot be held in an int
+    column, so a row missing an integer feature is dropped rather than silently
+    turned into 0, which would read as a real measurement.
+    """
+    import pandas as pd
+
+    out = df.copy()
+    for col, dtype in STORE_DTYPES.items():
+        if col not in out.columns:
+            continue
+        if dtype.startswith("int"):
+            numeric = pd.to_numeric(out[col], errors="coerce")
+            if numeric.isna().any():
+                out = out[numeric.notna()]
+                numeric = numeric.loc[out.index]
+            out[col] = numeric.round().astype(dtype)
+        elif dtype == "object":
+            out[col] = out[col].astype(str)
+        else:
+            out[col] = pd.to_numeric(out[col], errors="coerce").astype(dtype)
+    return out
+
+
 def build_recent_rows(days=10):
+
     """A continuous window of hourly Feature Store rows, newest last.
 
     Only fully observed hours are returned - forecast-weather hours have no

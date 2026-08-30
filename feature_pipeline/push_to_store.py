@@ -24,9 +24,11 @@ import os
 import pandas as pd
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "utils"))
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from hopsworks_client import get_feature_store
 from config import HOPSWORKS_PROJECT_NAME, FEATURE_GROUP_NAME, FEATURE_GROUP_VERSION
+from compute_features import coerce_store_dtypes
 
 FEATURE_GROUP_DESCRIPTION = (
     "Hourly Lahore air quality: pollutant concentrations, weather, dispersion "
@@ -56,12 +58,24 @@ def push_feature_rows(rows):
         print("Nothing to insert - no feature rows were produced.")
         return
 
+    # Pin the dtypes here rather than at each call site, so the hourly pipeline
+    # and the backfill cannot disagree. Without this, int width follows the host
+    # platform and Linux CI is rejected by a group registered from Windows.
+    before = len(df)
+    df = coerce_store_dtypes(df)
+    if len(df) < before:
+        print(f"Dropped {before - len(df)} row(s) missing an integer feature")
+    if df.empty:
+        print("Nothing to insert - no rows survived dtype coercion.")
+        return
+
     fs = get_feature_store(HOPSWORKS_PROJECT_NAME)
     fg = get_or_create_fg(fs)
 
     fg.insert(df)
     print(f"Inserted {len(df)} row(s) into feature group "
           f"'{FEATURE_GROUP_NAME}' (v{FEATURE_GROUP_VERSION})")
+
 
 
 def push_feature_row(feature_row):
