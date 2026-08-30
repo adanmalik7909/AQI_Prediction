@@ -168,6 +168,7 @@ def test_no_future_leakage_in_history_features():
     )
 
 
+@pytest.mark.needs_trained_models
 def test_saved_feature_lists_exist():
     lists = _saved_feature_lists()
     assert lists, ("No feature_columns.pkl found - run "
@@ -178,8 +179,10 @@ def test_saved_feature_lists_exist():
             f"{horizon}: a target column leaked into the feature list"
 
 
+@pytest.mark.needs_trained_models
 @pytest.mark.parametrize("horizon", HORIZONS)
 def test_live_row_covers_trained_features(horizon, live_row):
+
     """THE key train-serve check: every column the model expects must be
     present in the live row, and none of them may be NaN."""
     path = os.path.join(MODELS_DIR, horizon, "feature_columns.pkl")
@@ -195,6 +198,7 @@ def test_live_row_covers_trained_features(horizon, live_row):
     assert not nans, f"{horizon}: NaN in live features: {nans[:8]}"
 
 
+@pytest.mark.needs_trained_models
 @pytest.mark.parametrize("horizon", HORIZONS)
 def test_local_models_predict_sane_values(horizon, live_row):
     """Load each locally saved model and predict from the live row. Values

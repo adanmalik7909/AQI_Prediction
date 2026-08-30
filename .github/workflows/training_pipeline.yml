@@ -49,12 +49,19 @@ jobs:
       # These tests catch target-leakage and feature-drift bugs. Running them
       # first means a broken pipeline fails in seconds instead of retraining
       # for 20 minutes and registering a bad model.
+      #
+      # trained_models/ is gitignored, so on a fresh runner it does not exist
+      # yet. Tests that read those artifacts are marked needs_trained_models and
+      # deselected here, then run for real in step 6 after training has produced
+      # them. The marker is used rather than naming tests with -k, because the -k
+      # form has to list every artifact-dependent test by hand and already missed
+      # test_saved_feature_lists_exist, which failed this step.
       - name: Run consistency tests
         env:
           HOPSWORKS_API_KEY: ${{ secrets.HOPSWORKS_API_KEY }}
         run: |
           python -m pytest tests/test_serving_consistency.py -v \
-            -k "not live_row_covers and not local_models_predict"
+            -m "not needs_trained_models"
 
 
       # ── 5. Train models + register to Hopsworks ─────────────
