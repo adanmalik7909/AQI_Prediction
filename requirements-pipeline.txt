@@ -27,6 +27,7 @@ scipy
 scikit-learn
 tensorflow>=2.15,<2.19
 xgboost>=2.0,<3.0
+lightgbm>=4.0,<5.0
 protobuf>=4.25.4,<5.0.0
 joblib
 hopsworks[python]
@@ -35,3 +36,5 @@ matplotlib
 seaborn
 python-dotenv
 jupyter
+pytest
+

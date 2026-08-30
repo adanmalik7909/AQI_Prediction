@@ -13,9 +13,10 @@
 name: Training Pipeline
 
 on:
-  # schedule:
-  #   - cron: '0 2 * * *'    # Daily at 2:00 AM UTC = 7:00 AM PKT  [PAUSED - re-enable before Sept 1 submission]
+  schedule:
+    - cron: '0 2 * * *'    # Daily at 2:00 AM UTC = 7:00 AM PKT
   workflow_dispatch:           # Manual "Run workflow" button in Actions tab
+
 
 # If a run is already in progress, don't start another one
 concurrency:
@@ -44,19 +45,41 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements-pipeline.txt
 
-      # ── 4. Train models + register to Hopsworks ─────────────
+      # ── 4. Verify train-serve consistency BEFORE training ───
+      # These tests catch target-leakage and feature-drift bugs. Running them
+      # first means a broken pipeline fails in seconds instead of retraining
+      # for 20 minutes and registering a bad model.
+      - name: Run consistency tests
+        env:
+          HOPSWORKS_API_KEY: ${{ secrets.HOPSWORKS_API_KEY }}
+        run: |
+          python -m pytest tests/test_serving_consistency.py -v \
+            -k "not live_row_covers and not local_models_predict"
+
+
+      # ── 5. Train models + register to Hopsworks ─────────────
       - name: Run Training Pipeline
         env:
           HOPSWORKS_API_KEY: ${{ secrets.HOPSWORKS_API_KEY }}
         run: python training_pipeline/run_training.py
 
-      # ── 5. Run SHAP explainability analysis ──────────────────
+      # ── 6. Verify the registered models actually predict ────
+      #    test_app_smoke needs the Streamlit runtime and a browser-less
+      #    render; it is exercised locally rather than here.
+      - name: Verify end-to-end prediction
+        env:
+          HOPSWORKS_API_KEY: ${{ secrets.HOPSWORKS_API_KEY }}
+        run: python -m pytest tests/ -v --ignore=tests/test_app_smoke.py
+
+
+
+      # ── 7. Run SHAP explainability analysis ──────────────────
       - name: Run SHAP Explanation
         env:
           HOPSWORKS_API_KEY: ${{ secrets.HOPSWORKS_API_KEY }}
         run: python training_pipeline/explain_shap.py
 
-      # ── 6. Job summary (visible in Actions tab) ─────────────
+      # ── 8. Job summary (visible in Actions tab) ─────────────
       - name: Write job summary
         if: always()
         run: |
@@ -64,3 +87,14 @@ jobs:
           echo "- **Status:** ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Time:** $(date -u '+%Y-%m-%d %H:%M UTC')" >> $GITHUB_STEP_SUMMARY
           echo "- **Trigger:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+          for h in target_24h target_48h target_72h; do
+            f="trained_models/$h/results.csv"
+            if [ -f "$f" ]; then
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "### $h" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              cut -d, -f1-4 "$f" | column -s, -t >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+

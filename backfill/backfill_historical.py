@@ -1,155 +1,86 @@
 """
 backfill/backfill_historical.py
 ----------------------------------
-Fetches ~2 years of HOURLY historical weather + air quality data from
-Open-Meteo, converts every hour into a feature row (same format as
-fetch_data.py + compute_features.py produce for live data), and pushes
-ALL of them into the SAME Hopsworks feature group in one bulk insert.
+Fills the Hopsworks Feature Store with the full hourly history, so the feature
+group is a genuine store of record rather than just a rolling recent window.
+
+It reuses utils/data_source.load_history() - the SAME loader the training
+pipeline uses - so the stored rows carry the identical columns and the identical
+EPA-correct AQI. An earlier version of this script re-implemented the merge by
+hand and produced the instantaneous AQI plus only the five original weather
+columns, which is exactly the drift a feature store is supposed to prevent.
 
 Run: python backfill/backfill_historical.py
 
-NOTE: Open-Meteo's archive/reanalysis data usually has a few days of
-processing delay, so we don't request all the way up to "today" -
-we leave a small buffer (END_DATE_LAG_DAYS) before the end date.
+Open-Meteo's archive lags real time by a few days; load_history() already leaves
+that buffer. Inserts are chunked because a single ~35k-row insert is slow and an
+interrupted one leaves no useful progress behind.
 """
 
-import sys
 import os
-import json
-from datetime import datetime, timedelta, timezone
+import sys
 
 import pandas as pd
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "utils"))
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "feature_pipeline"))
 
-from openmeteo_client import get_historical_weather, get_historical_air_quality
-from aqi_calculator import calculate_aqi_from_concentrations
-from hopsworks_client import get_feature_store
-from config import (
-    LAT, LON, CITY_NAME,
-    HOPSWORKS_PROJECT_NAME, FEATURE_GROUP_NAME, FEATURE_GROUP_VERSION,
-)
-from compute_features import compute_features
+from config import CITY_NAME, FEATURE_GROUP_NAME, FEATURE_GROUP_VERSION
+from data_source import load_history
+from compute_features import STORE_COLUMNS
+from push_to_store import push_feature_rows
 
-BACKFILL_DAYS = 730          # ~2 years
-END_DATE_LAG_DAYS = 5        # leave a buffer - very recent data may not be processed yet
+CHUNK_ROWS = 5000
 
 
-def build_date_range():
-    end_date = datetime.now(timezone.utc) - timedelta(days=END_DATE_LAG_DAYS)
-    start_date = end_date - timedelta(days=BACKFILL_DAYS)
-    return start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")
+def build_historical_rows(refresh=False):
+    """Full hourly history shaped exactly like the hourly pipeline's rows."""
+    df = load_history(refresh=refresh)
+
+    ts = pd.to_datetime(df["timestamp"])
+    df = df.copy()
+    df["city"] = CITY_NAME
+    df["hour"] = ts.dt.hour
+    df["day"] = ts.dt.day
+    df["month"] = ts.dt.month
+    df["day_of_week"] = ts.dt.dayofweek
+    df["is_weekend"] = (ts.dt.dayofweek >= 5).astype(int)
+    df["timestamp"] = ts.dt.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+
+    for col in STORE_COLUMNS:
+        if col not in df.columns:
+            df[col] = float("nan")
+
+    # Rows without an AQI have no target and cannot be trained on. The first
+    # ~24 hours always drop out here: the EPA index needs a 24h window before
+    # it can be computed at all.
+    before = len(df)
+    df = df[df["aqi"].notna()]
+    print(f"Prepared {len(df)} rows ({before - len(df)} dropped - no AQI yet)")
+
+    return df[STORE_COLUMNS].reset_index(drop=True)
 
 
-def build_historical_rows(start_date, end_date):
-    """
-    Fetches historical weather + air quality, merges them by matching
-    timestamp, and runs each hour through compute_features() - exactly
-    like the live pipeline does for a single snapshot.
-    """
-    print(f"Fetching historical weather ({start_date} to {end_date})...")
-    weather_data = get_historical_weather(LAT, LON, start_date, end_date)
+def main():
+    rows = build_historical_rows()
 
-    print(f"Fetching historical air quality ({start_date} to {end_date})...")
-    air_data = get_historical_air_quality(LAT, LON, start_date, end_date)
+    if rows.empty:
+        print("No rows to insert - check the archive response.")
+        return 1
 
-    w_hourly = weather_data["hourly"]
-    a_hourly = air_data["hourly"]
+    print(f"Backfilling {len(rows)} hourly rows into "
+          f"'{FEATURE_GROUP_NAME}' v{FEATURE_GROUP_VERSION} "
+          f"({rows['timestamp'].iloc[0]} -> {rows['timestamp'].iloc[-1]}) "
+          f"in chunks of {CHUNK_ROWS}...")
 
-    # Index air quality data by timestamp, for fast lookup while looping weather
-    air_by_time = {}
-    for i, t in enumerate(a_hourly["time"]):
-        air_by_time[t] = {
-            "pm2_5": a_hourly["pm2_5"][i],
-            "pm10": a_hourly["pm10"][i],
-            "o3": a_hourly["ozone"][i],
-            "co": a_hourly["carbon_monoxide"][i],
-            "so2": a_hourly["sulphur_dioxide"][i],
-            "no2": a_hourly["nitrogen_dioxide"][i],
-            "nh3": a_hourly["ammonia"][i],
-        }
+    for start in range(0, len(rows), CHUNK_ROWS):
+        chunk = rows.iloc[start:start + CHUNK_ROWS]
+        print(f"  rows {start}-{start + len(chunk) - 1}...")
+        push_feature_rows(chunk)
 
-    rows = []
-    skipped = 0
-
-    for i, t in enumerate(w_hourly["time"]):
-        if t not in air_by_time:
-            skipped += 1
-            continue  # no matching air quality reading for this hour, skip it
-
-        pollutants = air_by_time[t]
-        components = {k: v for k, v in pollutants.items() if k != "nh3"}
-
-        # Skip hours where core pollutant data is missing (can't compute AQI)
-        if components.get("pm2_5") is None or components.get("pm10") is None:
-            skipped += 1
-            continue
-
-        overall_aqi, dominant_pollutant, breakdown = calculate_aqi_from_concentrations(components)
-
-        # Build the same raw_data shape that fetch_data.py produces for live data,
-        # so we can reuse compute_features() unchanged.
-        raw_row = {
-            "city": CITY_NAME,
-            "lat": LAT,
-            "lon": LON,
-            "weather": {
-                "time": t,
-                "temperature_2m": w_hourly["temperature_2m"][i],
-                "relative_humidity_2m": w_hourly["relative_humidity_2m"][i],
-                "surface_pressure": w_hourly["surface_pressure"][i],
-                "wind_speed_10m": w_hourly["wind_speed_10m"][i],
-                "cloud_cover": w_hourly["cloud_cover"][i],
-            },
-            "air_quality": {
-                "time": t,
-                "pm2_5": pollutants["pm2_5"],
-                "pm10": pollutants["pm10"],
-                "ozone": pollutants["o3"],
-                "carbon_monoxide": pollutants["co"],
-                "sulphur_dioxide": pollutants["so2"],
-                "nitrogen_dioxide": pollutants["no2"],
-                "ammonia": pollutants["nh3"],
-            },
-            "calculated_aqi": {
-                "overall_aqi": overall_aqi,
-                "dominant_pollutant": dominant_pollutant,
-                "breakdown": breakdown,
-            },
-        }
-
-        rows.append(compute_features(raw_row))
-
-    print(f"Built {len(rows)} hourly feature rows ({skipped} hours skipped due to missing data).")
-    return rows
-
-
-def push_historical_rows(rows):
-    """Bulk-insert all historical rows into the SAME feature group used by the live pipeline."""
-    df = pd.DataFrame(rows)
-
-    fs = get_feature_store(HOPSWORKS_PROJECT_NAME)
-    fg = fs.get_or_create_feature_group(
-        name=FEATURE_GROUP_NAME,
-        version=FEATURE_GROUP_VERSION,
-        description="Hourly AQI, weather, and pollutant features",
-        primary_key=["city", "unix_time"],
-        event_time="unix_time",
-        online_enabled=False,
-        time_travel_format="HUDI",
-    )
-
-    print(f"Inserting {len(df)} rows into feature group '{FEATURE_GROUP_NAME}' (v{FEATURE_GROUP_VERSION})...")
-    fg.insert(df)
     print("Backfill complete!")
+    return 0
 
 
 if __name__ == "__main__":
-    start_date, end_date = build_date_range()
-    rows = build_historical_rows(start_date, end_date)
-
-    if rows:
-        push_historical_rows(rows)
-    else:
-        print("No rows to insert - check the date range and API responses.")
+    sys.exit(main())

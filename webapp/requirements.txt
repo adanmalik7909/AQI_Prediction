@@ -9,6 +9,7 @@ pandas
 numpy
 scikit-learn
 xgboost>=2.0,<3.0
+lightgbm>=4.0,<5.0
 tensorflow>=2.15,<2.19
 keras>=3.0
 protobuf>=4.25.4,<5.0.0
@@ -16,3 +17,4 @@ joblib
 hopsworks[python]
 shap
 python-dotenv
+requests

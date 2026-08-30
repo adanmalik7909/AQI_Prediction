@@ -12,9 +12,10 @@
 name: Feature Pipeline
 
 on:
-  # schedule:
-  #   - cron: '0 * * * *'   # Every hour at :00  [PAUSED - re-enable before Sept 1 submission]
+  schedule:
+    - cron: '0 * * * *'   # Every hour at :00 UTC
   workflow_dispatch:          # Manual "Run workflow" button in Actions tab
+
 
 # If a run is already in progress, don't start another one
 concurrency:
@@ -45,10 +46,14 @@ jobs:
         run: pip install -r requirements-feature.txt
 
       # ── 4. Run the pipeline ──────────────────────────────────
+      #    run_pipeline.py exits non-zero when it produces no rows, so a run
+      #    that stores nothing shows up red instead of silently green.
       - name: Run Feature Pipeline
         env:
           HOPSWORKS_API_KEY: ${{ secrets.HOPSWORKS_API_KEY }}
-        run: python feature_pipeline/run_pipeline.py
+        working-directory: feature_pipeline
+        run: python run_pipeline.py
+
 
       # ── 5. Job summary (visible in Actions tab) ─────────────
       - name: Write job summary
@@ -58,3 +63,6 @@ jobs:
           echo "- **Status:** ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Time:** $(date -u '+%Y-%m-%d %H:%M UTC')" >> $GITHUB_STEP_SUMMARY
           echo "- **Trigger:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Writes:** a rolling 10-day window of hourly rows, upserted" \
+               "on (city, unix_time) so a missed run self-heals" >> $GITHUB_STEP_SUMMARY
+

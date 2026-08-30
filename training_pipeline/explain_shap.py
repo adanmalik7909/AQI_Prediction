@@ -37,24 +37,33 @@ import shap
 from sklearn.linear_model import Ridge
 from sklearn.ensemble import RandomForestRegressor
 from xgboost import XGBRegressor
+from lightgbm import LGBMRegressor
+
+# Every tree ensemble we train - all supported by SHAP's exact TreeExplainer
+TREE_MODEL_TYPES = (XGBRegressor, RandomForestRegressor, LGBMRegressor)
+
 
 sys.path.append(os.path.dirname(__file__))
-from fetch_training_data import fetch_and_prepare_training_data
-from train_models import get_feature_columns, chronological_split, TARGET_HORIZONS, TEST_SIZE_FRACTION
+from fetch_training_data import fetch_and_prepare_training_data, TARGET_HORIZONS
+from train_models import chronological_split, FINAL_TEST_FRACTION
 
 MODELS_DIR = os.path.join(os.path.dirname(__file__), "..", "trained_models")
 BACKGROUND_SAMPLE_SIZE = 100   # rows used as SHAP's "background" reference
 EXPLAIN_SAMPLE_SIZE = 200      # rows to actually compute SHAP values for (keeps it fast)
 
+# Tree models were trained on RAW features; Ridge and the NN on SCALED ones.
+SCALED_INPUT_MODELS = ("Ridge Regression", "Neural Network (TF)")
+
 
 def load_bundle(horizon):
-    """Loads the winning model + scaler + metadata for a horizon."""
+    """Loads the winning model + scaler + feature list + metadata."""
     bundle_dir = os.path.join(MODELS_DIR, horizon, "registry_bundle")
 
     with open(os.path.join(bundle_dir, "metadata.json")) as f:
         metadata = json.load(f)
 
     scaler = joblib.load(os.path.join(bundle_dir, "scaler.pkl"))
+    feature_cols = joblib.load(os.path.join(bundle_dir, "feature_columns.pkl"))
 
     if metadata["flavor"] == "sklearn":
         model = joblib.load(os.path.join(bundle_dir, metadata["model_file"]))
@@ -62,25 +71,33 @@ def load_bundle(horizon):
         from tensorflow import keras
         model = keras.models.load_model(os.path.join(bundle_dir, metadata["model_file"]))
 
-    return model, scaler, metadata
+    return model, scaler, feature_cols, metadata
 
 
-def explain_horizon(df, feature_cols, target_col, horizon_name):
+
+def explain_horizon(df, target_col, horizon_name):
     print(f"\n{'='*65}\nSHAP EXPLANATION: {horizon_name}\n{'='*65}")
 
-    model, scaler, metadata = load_bundle(horizon_name)
+    model, scaler, feature_cols, metadata = load_bundle(horizon_name)
     print(f"Explaining the winning model: {metadata['model_name']}")
 
-    _, test_df = chronological_split(df, TEST_SIZE_FRACTION)
+    _, test_df = chronological_split(df, FINAL_TEST_FRACTION)
     X_test = test_df[feature_cols]
-    X_test_scaled = pd.DataFrame(scaler.transform(X_test), columns=feature_cols)
+
+    # Explain the model in the space it was actually trained in, otherwise
+    # the attributions describe a transformation the model never saw.
+    if metadata["model_name"] in SCALED_INPUT_MODELS:
+        X_model = pd.DataFrame(scaler.transform(X_test), columns=feature_cols)
+    else:
+        X_model = X_test.reset_index(drop=True)
 
     # Modest samples - SHAP can be slow, especially on non-tree models
-    background = X_test_scaled.sample(n=min(BACKGROUND_SAMPLE_SIZE, len(X_test_scaled)), random_state=42)
-    explain_sample = X_test_scaled.sample(n=min(EXPLAIN_SAMPLE_SIZE, len(X_test_scaled)), random_state=42)
+    background = X_model.sample(n=min(BACKGROUND_SAMPLE_SIZE, len(X_model)), random_state=42)
+    explain_sample = X_model.sample(n=min(EXPLAIN_SAMPLE_SIZE, len(X_model)), random_state=42)
+
 
     if metadata["flavor"] == "sklearn":
-        if isinstance(model, (XGBRegressor, RandomForestRegressor)):
+        if isinstance(model, TREE_MODEL_TYPES):
             # Tree-based models: TreeExplainer is fast, exact, and purpose-built for these
             explainer = shap.TreeExplainer(model)
         elif isinstance(model, Ridge):
@@ -89,6 +106,7 @@ def explain_horizon(df, feature_cols, target_col, horizon_name):
         else:
             explainer = shap.Explainer(model, background)
         shap_values_array = explainer(explain_sample).values
+
     else:
         # Neural Network: DeepExplainer is purpose-built for TF/Keras models
         # and uses backpropagation internally - MUCH faster than the generic
@@ -143,12 +161,11 @@ def explain_horizon(df, feature_cols, target_col, horizon_name):
 
 
 def main():
-    df = fetch_and_prepare_training_data()
-    feature_cols = get_feature_columns(df)
+    df, _ = fetch_and_prepare_training_data()
 
     all_importances = {}
     for target_col in TARGET_HORIZONS:
-        importance_df = explain_horizon(df, feature_cols, target_col, target_col)
+        importance_df = explain_horizon(df, target_col, target_col)
         all_importances[target_col] = importance_df
 
     print("\n\n" + "=" * 65)
@@ -157,6 +174,7 @@ def main():
     for horizon, importance_df in all_importances.items():
         top5 = ", ".join(importance_df.head(5)["feature"].tolist())
         print(f"{horizon}: {top5}")
+
 
 
 if __name__ == "__main__":

@@ -12,6 +12,10 @@ aqi_env/
 trained_models/
 webapp/model_cache/
 
+# Local hourly data cache (re-downloaded from Open-Meteo on demand)
+data_cache/
+
 # OS
 .DS_Store
 Thumbs.db
+
