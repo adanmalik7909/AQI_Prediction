@@ -163,3 +163,44 @@ def test_feature_store_reindex_closes_hourly_gaps():
     # The missing hours become NaN rather than being silently interpolated -
     # fabricating pollutant values would be worse than dropping the row later.
     assert out["pm2_5"].isna().sum() == 3
+
+
+def test_feature_store_reindex_fills_small_gaps_on_live_path():
+    """Live inference resilience: forward-fill isolated 1-2h gaps, leave larger
+    gaps as NaN so caller can fall back cleanly."""
+    from feature_store_source import reindex_hourly
+
+    # Timestamps with:
+    # - 1h missing (between 01:00 and 03:00 -> 02:00 missing, size=1)
+    # - 3h missing (between 04:00 and 08:00 -> 05, 06, 07 missing, size=3)
+    df = pd.DataFrame({
+        "timestamp": pd.to_datetime(["2026-01-01 01:00",
+                                     "2026-01-01 03:00",
+                                     "2026-01-01 04:00",
+                                     "2026-01-01 08:00"]),
+        "pm2_5": [50.0, 52.0, 55.0, 60.0],
+        "dominant_pollutant": ["pm2_5", "pm2_5", "pm2_5", "pm2_5"],
+    })
+
+    # Live path: fill_small_gaps=True, max_fill_hours=2
+    live_out = reindex_hourly(df, fill_small_gaps=True, max_fill_hours=2)
+
+    # Total hours from 01:00 to 08:00 = 8 rows
+    assert len(live_out) == 8
+
+    # Hour 02:00 was 1h gap -> MUST be filled from 01:00
+    row_02 = live_out[live_out["timestamp"] == "2026-01-01 02:00:00"].iloc[0]
+    assert row_02["pm2_5"] == 50.0
+    assert row_02["dominant_pollutant"] == "pm2_5"
+
+    # Hours 05:00, 06:00, 07:00 were 3h gap (> 2h) -> MUST remain NaN
+    unfilled_times = pd.to_datetime([
+        "2026-01-01 05:00:00", "2026-01-01 06:00:00", "2026-01-01 07:00:00"
+    ])
+    unfilled = live_out[live_out["timestamp"].isin(unfilled_times)]
+    assert unfilled["pm2_5"].isna().all()
+
+    # Training path: fill_small_gaps=False -> all 4 missing hours are NaN
+    train_out = reindex_hourly(df, fill_small_gaps=False)
+    assert train_out["pm2_5"].isna().sum() == 4
+

@@ -184,6 +184,18 @@ output silently.
 6. **Hourly grid enforcement.** History is reindexed onto a strict hourly grid,
    so a missing hour cannot quietly shift what "24 hours ago" refers to.
 
+7. **Transient data-gap resilience.** A transient 1-2 hour gap in the trailing
+   window caused rolling features (`aqi_rolling_mean_48h`, `72h`, `168h`) to
+   cascade to NaN, crashing the dashboard and CI test gates. Solved with a
+   two-layer resilience architecture:
+   - **Live-path forward fill:** `reindex_hourly(fill_small_gaps=True, max_fill_hours=2)`
+     forward-fills isolated 1-2h gaps strictly on the live serving path.
+     Historical training paths leave gaps unfilled as true NaNs.
+   - **Backwards fallback:** If a gap is too large to fill safely (> 2h),
+     `webapp/app.py` and test fixtures walk backwards up to 48 hours to find
+     the latest timestamp with a complete feature window, recording the used
+     timestamp in the provenance dictionary.
+
 ## Files
 
 **New**

@@ -609,10 +609,15 @@ def _load_data():
     Both paths then run THE SAME utils.feature_engineering.build_features, so
     the served features cannot drift from the trained ones.
 
+    RESILIENCE: if the most recent observed row has NaN features (e.g. from a
+    data gap too large to fill), we walk backwards to find the latest row with
+    a COMPLETE feature window rather than crashing.  The provenance dict
+    records which timestamp was actually used so the dashboard can display it.
+
     Returns (feature_row, recent_history_df, provenance).
     """
     from data_source import load_recent, latest_observed_index
-    from feature_engineering import build_features
+    from feature_engineering import build_features, get_feature_columns
 
     recent, source, detail = _load_recent_observations(load_recent)
 
@@ -623,8 +628,42 @@ def _load_data():
     last_observed = latest_observed_index(featured)
 
     feature_row = featured.loc[last_observed]
+    used_ts = feature_row.get("timestamp", None)
+
+    # --- Gap resilience: fall back to an earlier complete row if needed ---
+    feature_cols = get_feature_columns(featured)
+    numeric_features = feature_row.reindex(feature_cols)
+    n_nan = int(numeric_features.isna().sum())
+
+    if n_nan > 0:
+        print(f"  [gap-resilience] Latest observed row ({used_ts}) has "
+              f"{n_nan} NaN feature(s) — searching backwards for a complete row")
+        # Walk backwards from last_observed to find a row with no NaN features
+        found = False
+        for idx in range(last_observed - 1, max(last_observed - 48, -1), -1):
+            if idx < 0:
+                break
+            candidate = featured.loc[idx]
+            # Must have valid AQI and pm2_5 (i.e. be a real observation)
+            if pd.isna(candidate.get("aqi")) or pd.isna(candidate.get("pm2_5")):
+                continue
+            candidate_feats = candidate.reindex(feature_cols)
+            if candidate_feats.isna().sum() == 0:
+                feature_row = candidate
+                used_ts = candidate.get("timestamp", None)
+                print(f"  [gap-resilience] Using row at {used_ts} "
+                      f"(offset: -{last_observed - idx}h from latest)")
+                found = True
+                break
+        if not found:
+            print(f"  [gap-resilience] WARNING: No complete row found in "
+                  f"last 48h — proceeding with {n_nan} NaN features")
+
     history = featured.loc[:last_observed, ["timestamp", "aqi"]].dropna()
-    return feature_row, history, {"source": source, "detail": detail}
+    prov = {"source": source, "detail": detail}
+    if used_ts is not None:
+        prov["prediction_timestamp"] = str(used_ts)
+    return feature_row, history, prov
 
 
 # Populated when a Feature Store read is attempted and does not work out, so
@@ -671,14 +710,23 @@ def _merge_store_history_with_forecast(store_history, openmeteo_frame):
     the store's own `aqi` column is instantaneous, and the accuracy
     investigation established that value is too noisy to forecast (see
     report/ACCURACY_UPGRADE.md), so it is deliberately not reused here.
+
+    RESILIENCE: the combined frame is reindexed onto a strict hourly grid
+    with small-gap forward-filling (up to 2 consecutive missing hours).
+    This prevents the rolling-feature NaN cascade that has crashed the
+    dashboard, CI, and feature pipeline on three separate occasions.
     """
     from aqi_daily import hourly_aqi_epa, dominant_pollutant
+    from feature_store_source import reindex_hourly
 
     last_observed = store_history["timestamp"].max()
     future = openmeteo_frame[openmeteo_frame["timestamp"] > last_observed]
 
     combined = pd.concat([store_history, future], ignore_index=True, sort=False)
     combined = combined.sort_values("timestamp").reset_index(drop=True)
+
+    # Reindex onto a strict hourly grid and fill small gaps (live path only).
+    combined = reindex_hourly(combined, fill_small_gaps=True, max_fill_hours=2)
 
     aqi, subs = hourly_aqi_epa(combined, return_breakdown=True)
     combined["aqi"] = aqi

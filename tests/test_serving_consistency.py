@@ -48,14 +48,42 @@ def live_row():
 
     Skipped rather than failed when Open-Meteo is unreachable - a network
     outage is not a defect in this code.
+
+    RESILIENCE: if the latest observed row has NaN features (e.g. from a
+    transient gap in the air quality data), walks backwards to find the
+    latest row with a complete feature window, exactly as the webapp does.
     """
     from data_source import load_recent, latest_observed_index
     try:
-        recent = load_recent(past_days=10)
+        # 14 days gives margin for the 168h window warmup + 24h AQI warmup
+        recent = load_recent(past_days=14)
     except Exception as e:
         pytest.skip(f"Open-Meteo unreachable ({type(e).__name__})")
     featured = build_features(recent, include_future_weather=True)
-    return featured.loc[latest_observed_index(featured)]
+    feature_cols = get_feature_columns(featured)
+    last_observed = latest_observed_index(featured)
+
+    row = featured.loc[last_observed]
+    numeric_feats = row.reindex(feature_cols)
+    n_nan = int(numeric_feats.isna().sum())
+
+    if n_nan > 0:
+        # Walk backwards to find a row with complete features
+        for idx in range(last_observed - 1, max(last_observed - 48, -1), -1):
+            if idx < 0:
+                break
+            candidate = featured.loc[idx]
+            if pd.isna(candidate.get("aqi")) or pd.isna(candidate.get("pm2_5")):
+                continue
+            if candidate.reindex(feature_cols).isna().sum() == 0:
+                print(f"  [test-resilience] Latest row had {n_nan} NaN features; "
+                      f"using row at {candidate.get('timestamp')} "
+                      f"(offset: -{last_observed - idx}h)")
+                return candidate
+        pytest.skip(f"No complete feature row found in last 48h "
+                    f"(latest row has {n_nan} NaN features)")
+
+    return row
 
 
 
@@ -212,6 +240,14 @@ def test_local_models_predict_sane_values(horizon, live_row):
     trained_cols = joblib.load(fcols_path)
     scaler = joblib.load(os.path.join(horizon_dir, "scaler.pkl"))
     X = live_row[trained_cols].to_frame().T.astype(float)
+
+    # --- NaN guard: fail with our own message instead of a raw sklearn crash ---
+    nan_cols = X.columns[X.isna().any()].tolist()
+    assert not nan_cols, (
+        f"{horizon}: live feature row has NaN in {len(nan_cols)} column(s) "
+        f"(first 8: {nan_cols[:8]}). This typically means a data gap in the "
+        f"trailing window broke the rolling features. Check the Feature Store "
+        f"or Open-Meteo source for missing hours.")
 
     checked = 0
     for filename, scaled in [("xgboost.pkl", False), ("lightgbm.pkl", False),
