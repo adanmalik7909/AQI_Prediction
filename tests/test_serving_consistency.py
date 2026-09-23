@@ -97,6 +97,56 @@ def _saved_feature_lists():
     return lists
 
 
+def test_sub_index_covers_breakpoint_gaps():
+    """Regression for the recurring NaN cascade.
+
+    The EPA breakpoint tables are non-contiguous (55.4 -> 55.5, 12.0 -> 12.1,
+    ...) because they assume the concentration was truncated to the pollutant's
+    precision first. A rolling 24h mean lands values like 55.43 in those gaps,
+    which returned NaN; a single NaN in the 168h window then made
+    aqi_rolling_mean_168h NaN and broke every live prediction. These values
+    must all resolve to a finite sub-index now.
+    """
+    import numpy as np
+    from aqi_daily import sub_index
+
+    for value in [55.43, 55.48, 12.05, 35.45, 150.45, 0.05]:
+        result = sub_index([value], "pm2_5")[0]
+        assert np.isfinite(result), \
+            f"pm2_5 {value} fell in a breakpoint gap and returned NaN"
+
+    # Truncation must not shift a value into the wrong bin: 55.4x truncates to
+    # 55.4 (top of the 101-150 band), 55.5 opens the next band at 151.
+    assert sub_index([55.43], "pm2_5")[0] == 150.0
+    assert sub_index([55.5], "pm2_5")[0] == 151.0
+
+
+def test_hourly_aqi_survives_a_short_interior_gap():
+    """A 1-2h hole in pm2_5 must not blank out the AQI for the whole day.
+
+    Before the truncation fix, the 24h mean spanning the gap produced a value in
+    a breakpoint gap and the hour's AQI went NaN even though pm2_5 was present
+    on either side."""
+    import numpy as np
+    from aqi_daily import hourly_aqi_epa
+
+    n = 60
+    ts = pd.date_range("2026-01-01", periods=n, freq="h")
+    pm = pd.Series(np.linspace(40, 70, n))
+    pm.iloc[30:32] = np.nan   # a 2-hour interior gap
+    df = pd.DataFrame({
+        "timestamp": ts, "pm2_5": pm, "pm10": pm * 1.2,
+        "o3": 40.0, "co": 500.0, "so2": 5.0, "no2": 20.0,
+    })
+
+    aqi = hourly_aqi_epa(df)
+    # Every hour with a warmed-up 24h window (>=18 of 24 present) must have AQI.
+    warm = aqi.iloc[24:]
+    assert warm.notna().all(), \
+        f"interior gap blanked {int(warm.isna().sum())} downstream AQI hours"
+
+
+
 # ------------------------------------------------------------------ tests
 
 def test_aqi_helper_matches_original_calculator():

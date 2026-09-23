@@ -59,20 +59,54 @@ MIN_HOURS_24H = 18
 MIN_HOURS_8H = 6
 
 
+# EPA truncation precision per pollutant, as the number of decimal places the
+# official method keeps before the table lookup (PM in ug/m3, O3/CO in ppm,
+# SO2/NO2 in ppb).
+#
+# This is not cosmetic. The breakpoint tables are non-contiguous by design -
+# there is a gap between the top of one bin and the bottom of the next
+# (PM2.5: 55.4 -> 55.5, 12.0 -> 12.1; etc.) because the tables assume the input
+# has already been truncated. A rolling 24h mean produces values like 55.43,
+# which fall in the 55.4-55.5 gap and matched NO bin, returning NaN. A single
+# such NaN anywhere in the trailing window then propagated into
+# aqi_rolling_mean_168h and broke live prediction. Truncating 55.43 -> 55.4
+# lands it correctly in the (35.5, 55.4] bin, exactly as the EPA intends.
+TRUNCATION_DECIMALS = {"pm2_5": 1, "pm10": 0, "o3": 3, "co": 1,
+                       "so2": 0, "no2": 0}
+
+
 def sub_index(conc, pollutant):
     """Vectorised EPA piecewise-linear sub-index for one pollutant.
 
-    Concentrations above the highest breakpoint are clamped to 500 rather
-    than dropped - aqi_calculator.py returns None there, which silently
-    removed the worst smog hours from the signal.
+    The concentration is first truncated to the EPA precision for that
+    pollutant (see TRUNCATION_DECIMALS), which is what makes the otherwise
+    non-contiguous breakpoint bins cover every real value. Concentrations above
+    the highest breakpoint are clamped to 500 rather than dropped -
+    aqi_calculator.py returns None there, which silently removed the worst smog
+    hours.
     """
     conc = np.asarray(conc, dtype=float)
+
+    # Truncate to the pollutant's precision (EPA truncates toward zero, it does
+    # not round). Do it on finite values only so NaNs (genuinely missing hours)
+    # stay NaN. The inner np.round(…, 6) kills binary-float error before the
+    # floor, so 55.4 does not become 55.39999→55.3; without it the truncation
+    # would itself reintroduce gap misses.
+    dp = TRUNCATION_DECIMALS[pollutant]
+    scale = 10 ** dp
+    finite = np.isfinite(conc)
+    conc = conc.copy()
+    conc[finite] = np.floor(np.round(conc[finite] * scale, 6)) / scale
+
+
     out = np.full(conc.shape, np.nan)
     for lo, hi, alo, ahi in BREAKPOINTS[pollutant]:
         mask = (conc >= lo) & (conc <= hi)
         out[mask] = (ahi - alo) / (hi - lo) * (conc[mask] - lo) + alo
     out[conc > BREAKPOINTS[pollutant][-1][1]] = 500.0
     return out
+
+
 
 
 def to_ppm(conc_ugm3, pollutant):

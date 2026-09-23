@@ -159,7 +159,50 @@ def latest_observed_index(df):
     return int(valid[valid].index[-1])
 
 
-def load_recent(past_days=10):
+def fill_recent_gaps(df, limit=3):
+    """Linear-interpolate small INTERIOR gaps in the live observation columns.
+
+    THE bug this fixes (recurred three times: dashboard crash, feature-pipeline
+    failure, CI failure)
+    Open-Meteo's air-quality feed occasionally drops an hour or two in the
+    middle of the recent window - the timestamp row is present, but pm2_5 (and
+    therefore the hour's AQI) is NaN. A single NaN anywhere inside the 168-hour
+    window makes aqi_rolling_mean_168h NaN, which then makes every model's
+    prediction fail. The earlier attempt only filled MISSING ROWS, so it never
+    touched this case, where the row exists but its values are NaN.
+
+    This interpolates only:
+      * interior gaps (``limit_area="inside"``) - never the leading warmup NaNs
+        or the trailing forecast-weather hours, which must stay NaN so they are
+        not mistaken for observations,
+      * runs of at most ``limit`` consecutive missing hours - a longer outage is
+        left as NaN so the caller's backwards-search fallback can pick an
+        earlier complete row rather than fabricating a day of data.
+
+    LIVE PATH ONLY. Training reads history through a different path and must see
+    the true NaNs, so model evaluation stays honest. Applied here, in the one
+    live-data loader, so both the Open-Meteo fallback and the tests that call
+    load_recent() get it without duplicating the logic.
+    """
+    obs_cols = [c for c in [
+        "pm2_5", "pm10", "o3", "co", "so2", "no2", "dust", "aod",
+        "temperature", "humidity", "pressure", "wind_speed", "cloud_cover",
+        "blh", "precipitation", "dew_point", "radiation", "wind_speed_100m",
+        "wind_dir",
+    ] if c in df.columns]
+
+    before = int(df[obs_cols].isna().sum().sum())
+    df[obs_cols] = df[obs_cols].interpolate(method="linear", limit=limit,
+                                            limit_area="inside")
+    after = int(df[obs_cols].isna().sum().sum())
+    filled = before - after
+    if filled:
+        print(f"  [gap-fill] interpolated {filled} interior observation "
+              f"value(s) across gaps <= {limit}h")
+    return df
+
+
+def load_recent(past_days=14):
     """Recent history PLUS the weather forecast, for LIVE PREDICTION.
 
     The returned frame runs from `past_days` ago to ~4 days into the future.
@@ -167,6 +210,11 @@ def load_recent(past_days=10):
     are forecast weather with empty pollutant columns, which is exactly what
     the future-weather features need. The caller predicts from the last row
     that has a valid AQI.
+
+    past_days defaults to 14: the AQI features reach back 168h (7 days) and the
+    24h EPA window needs ~a day to warm up before that, so a 10-day window left
+    almost no margin - one interior gap could push a NaN into the live row's
+    168h window. 14 days keeps the live row's whole window clear of the warmup.
     """
     weather = get_recent_weather(LAT, LON, past_days=past_days)
     air = get_recent_air_quality(LAT, LON, past_days=past_days)
@@ -180,11 +228,16 @@ def load_recent(past_days=10):
     df = df.sort_values("timestamp").reset_index(drop=True)
     df = df.drop(columns=[c for c in ["nh3"] if c in df.columns])
 
+    # Repair small interior gaps BEFORE computing AQI, so a dropped hour or two
+    # in the middle of the window does not cascade into NaN rolling features.
+    df = fill_recent_gaps(df)
+
     aqi, subs = hourly_aqi_epa(df, return_breakdown=True)
     df["aqi"] = aqi
     df["dominant_pollutant"] = dominant_pollutant(subs)
     df["unix_time"] = (df["timestamp"].astype("int64") // 10**9).astype("int64")
     return df
+
 
 
 if __name__ == "__main__":

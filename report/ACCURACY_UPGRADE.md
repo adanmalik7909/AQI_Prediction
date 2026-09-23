@@ -184,17 +184,39 @@ output silently.
 6. **Hourly grid enforcement.** History is reindexed onto a strict hourly grid,
    so a missing hour cannot quietly shift what "24 hours ago" refers to.
 
-7. **Transient data-gap resilience.** A transient 1-2 hour gap in the trailing
-   window caused rolling features (`aqi_rolling_mean_48h`, `72h`, `168h`) to
-   cascade to NaN, crashing the dashboard and CI test gates. Solved with a
-   two-layer resilience architecture:
-   - **Live-path forward fill:** `reindex_hourly(fill_small_gaps=True, max_fill_hours=2)`
-     forward-fills isolated 1-2h gaps strictly on the live serving path.
-     Historical training paths leave gaps unfilled as true NaNs.
-   - **Backwards fallback:** If a gap is too large to fill safely (> 2h),
-     `webapp/app.py` and test fixtures walk backwards up to 48 hours to find
-     the latest timestamp with a complete feature window, recording the used
-     timestamp in the provenance dictionary.
+7. **Transient data-gap resilience (the root cause behind three separate
+   crashes).** A gap of even one hour in the trailing window made every
+   `aqi_rolling_mean_*h` feature NaN, which crashed the dashboard, the feature
+   pipeline, and the CI test gate on separate days. It turned out to be *two*
+   independent bugs wearing the same symptom, and only fixing both stops it:
+
+   - **Missing values inside the AQI breakpoint gaps (the real root cause).**
+     The EPA breakpoint tables are non-contiguous by design (PM2.5 jumps 55.4 →
+     55.5, 12.0 → 12.1, …) because the official method truncates the
+     concentration to a fixed precision *before* the table lookup. The
+     vectorised `sub_index` skipped that truncation, so a 24h rolling mean like
+     55.43 fell in the 55.4–55.5 gap, matched no bin, and returned NaN — even
+     though PM2.5 was present. One such hour anywhere in the 168h window blanked
+     `aqi_rolling_mean_168h`. `sub_index` now truncates to the EPA precision per
+     pollutant, so every real value lands in a bin. This is both a correctness
+     fix (the AQI now matches the official method exactly) and the durable fix
+     for the cascade.
+   - **Missing hours in the live feed.** Open-Meteo occasionally drops an hour
+     or two of air-quality data mid-window (the row exists, the values are NaN).
+     `utils/data_source.fill_recent_gaps()` linearly interpolates only *interior*
+     gaps of ≤3 consecutive hours, on the live path only — never the leading
+     warmup or the trailing forecast hours, and never the training data, which
+     must see true NaNs for honest evaluation. Larger outages are left as NaN so
+     the backwards-search fallback picks an earlier complete row rather than
+     fabricating a day of data.
+   - **Backwards fallback (last resort).** If the live row still has NaN
+     features, `webapp/app.py` and the test fixtures walk back up to 48h to the
+     latest complete row and record which timestamp was used in the provenance
+     dict, so the dashboard is honest about it.
+
+   The live prediction window was also widened from 10 to 14 days so the 168h
+   lag plus the 24h AQI warmup always clears the start of the frame.
+
 
 ## Files
 

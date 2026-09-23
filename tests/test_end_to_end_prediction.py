@@ -163,21 +163,43 @@ def test_forecasts_are_ordered_sensibly(live_row):
     assert max(values) - min(values) < 250, f"horizons diverge wildly: {preds}"
 
 
-def test_scaling_choice_actually_matters(live_row):
+def test_scaling_choice_actually_matters():
     """Guards the bug that was found: if a tree model is fed scaled input it
-    still returns a number, just a wrong one. Assert the two paths differ, so
-    the distinction can never be dismissed as cosmetic."""
+    still returns a number, just a wrong one. Assert the two paths differ.
+
+    Averaged over many recent rows rather than judged on a single live row:
+    at any one row scaled and raw input can happen to land close together
+    (this test failed CI once on exactly that coincidence, diff 0.76). The
+    mean absolute difference over a spread of rows is what actually
+    demonstrates that scaling changes the answer, and it is not luck-dependent.
+    """
+    from data_source import load_recent
+    from feature_engineering import build_features
+
     bundle = load_bundle("target_24h")
     if bundle is None or bundle["meta"]["model_name"] in SCALED_INPUT_MODELS:
         pytest.skip("24h winner is a scaled-input model")
 
-    X = live_row[bundle["features"]].to_frame().T.astype(float)
-    correct = float(bundle["model"].predict(X)[0])
-    wrong = float(bundle["model"].predict(bundle["scaler"].transform(X))[0])
+    try:
+        recent = load_recent(past_days=14)
+    except Exception as e:
+        pytest.skip(f"Open-Meteo unreachable ({type(e).__name__})")
 
-    assert abs(correct - wrong) > 1.0, (
-        "Scaled and raw input produced nearly the same prediction - the "
-        "regression test for the scaling bug is no longer meaningful")
+    featured = build_features(recent, include_future_weather=True)
+    X = featured[bundle["features"]].astype(float).dropna()
+    if len(X) < 24:
+        pytest.skip("not enough complete rows to compare scaling paths")
+    X = X.tail(72)
+
+    raw = bundle["model"].predict(X)
+    scaled = bundle["model"].predict(bundle["scaler"].transform(X))
+    mean_abs_diff = float(np.abs(raw - scaled).mean())
+
+    assert mean_abs_diff > 1.0, (
+        f"Scaled and raw input produced near-identical predictions "
+        f"(mean abs diff {mean_abs_diff:.3f} over {len(X)} rows) - the "
+        f"regression test for the scaling bug is no longer meaningful")
+
 
 
 if __name__ == "__main__":

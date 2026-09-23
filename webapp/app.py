@@ -718,6 +718,7 @@ def _merge_store_history_with_forecast(store_history, openmeteo_frame):
     """
     from aqi_daily import hourly_aqi_epa, dominant_pollutant
     from feature_store_source import reindex_hourly
+    from data_source import fill_recent_gaps
 
     last_observed = store_history["timestamp"].max()
     future = openmeteo_frame[openmeteo_frame["timestamp"] > last_observed]
@@ -725,8 +726,13 @@ def _merge_store_history_with_forecast(store_history, openmeteo_frame):
     combined = pd.concat([store_history, future], ignore_index=True, sort=False)
     combined = combined.sort_values("timestamp").reset_index(drop=True)
 
-    # Reindex onto a strict hourly grid and fill small gaps (live path only).
+    # Reindex onto a strict hourly grid (fills fully MISSING rows), then
+    # interpolate small INTERIOR value gaps (rows present but pm2_5 etc. NaN).
+    # Both are needed: the store can have either kind of gap, and a single NaN
+    # anywhere in the 168h window is enough to break the live prediction.
     combined = reindex_hourly(combined, fill_small_gaps=True, max_fill_hours=2)
+    combined = fill_recent_gaps(combined)
+
 
     aqi, subs = hourly_aqi_epa(combined, return_breakdown=True)
     combined["aqi"] = aqi
